@@ -211,9 +211,6 @@ def send_update_notice(msg) -> None:
         )
     )
 
-def dmesg(msg):
-    print(f'D: {msg}')
-
 def sanitize_record(record: str, domain: str) -> str:
     ''' Sanitize record name to ensure fully qualified '''
     if '.' in record and not record.endswith(domain):
@@ -239,7 +236,7 @@ def main() -> None:
     for item in config.RECORDS:
         domain = item['domain']
         record_name = sanitize_record(item['record'],domain)
-        dmesg(f'{domain=}, {record_name=}')
+
         zone_id = get_zone_id(session, domain)
         record = get_record(session, zone_id, record_name)
         try: 
