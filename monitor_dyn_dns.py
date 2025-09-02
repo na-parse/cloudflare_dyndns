@@ -20,8 +20,11 @@ Configuration file is '.config' and uses JSON to define:
 
 See README.md for further details on configuration
 '''
+# Disabling warnings from urllib3 because I use a Mac and Apple mucks things up
+#  by building with LibreSSH instead of OpenSSH...
 import warnings
 warnings.filterwarnings("ignore", module="urllib3")
+
 import requests
 import sys
 import os
