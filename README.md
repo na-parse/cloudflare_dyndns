@@ -1,7 +1,8 @@
 # cloudflare_DynDNS
 
-Nathan's tool(s?) for managing dynamic DNS with cloudflare as the DNS provider
+Python base script to automate Dynamic DNS WAN IP assignment updates for Cloudflare hosted DNS records.  Built because the Unifi built-in dynamic DNS does not behave well with my configuration.
 
+Primarily intended for personal use but if someone else wants to use it, feel free to submit feedback/issues/etc on the github page: https://github.com/na-parse/cloudflare_dyndns
 
 ## Configuration
 
