@@ -5,7 +5,7 @@ Nathan's tool(s?) for managing dynamic DNS with cloudflare as the DNS provider
 
 ## Configuration
 
-Create the `.config` file in the same directory as the script `monitor_dyn_dns.py`.  Configuration is defined in JSON format:
+Create the `.config` file in the same directory as the `cfddns.py` script.  Configuration is defined in JSON format:
 
 ```json
 {
