@@ -25,17 +25,26 @@ The record names are expected in a Fully Qualified Domain Name format and you sp
 
 Embedded subdomains are not supported: `{"domain": "example.net", "record": "vpn.external"}`.
 
+## Usage
+
+`cfddns.py monitor` - Check for Dynamic DNS updates for configured records
+`cfddns.py show-log` - Show script log/history
+
+`cfdns.py` without parameters will display an extended CLI guide for additional _show-log_ options.
+
 ## Operation
 
-Schedule the `monitor_dyn_dns.py` to run at your desired interval for maintaining your dynamic DNS entries.  When in doubt, `*/15 * * * *` is probably good enough.
+Configure your prefered scheduler (let's be honest, it's cron, you're going to use cron) to run `cfddns.py monitor` at your desired interval for maintaining your dynamic DNS entries.  When in doubt, `*/15` is probably good enough.
 
-The monitor uses https://api.ipify.org to get the external IP and then checks all configured DNS records to verify that have the correct/current IP address.
+```bash
+*/15 * * * *   /path/to/cloudflare_dyndns/cfddns.py monitor
+```
 
 Records are updated if the External IP address does not match, and they are created if they do not exist.  No need to enter your CF dashboard ahead of time.
 
 The monitor will also use the system local `/usr/sbin/sendmail` to send an email after performing updates so you know what it did/changed.  Additionally it includes a heartbeat function.  If the last email sent from the monitor exceeds the configuration value `TIME_TO_NOTIFY` in seconds, a heartbeat email will be generated to let you know the monitor is still working and running.  The heartbeat ensures you don't get surprised that the monitor stopped working three months ago and none of your IPs were ever updated.
 
-## Why? Doesn't your GW do this?
+## Why? Doesn't your gateway/router do this?
 
 My home network runs a heavy Unifi stack from Ubiquity, including a Unifi Dream Machine Pro (UDM Pro) as the primary gateway device.
 
