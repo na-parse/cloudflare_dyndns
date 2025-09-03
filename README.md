@@ -31,7 +31,7 @@ Embedded subdomains are not supported: `{"domain": "example.net", "record": "vpn
 - `cfddns.py monitor` - Check for Dynamic DNS updates for configured records
 - `cfddns.py show-log` - Show script log/history
 
-`cfdns.py` without parameters will display an extended CLI guide for additional _show-log_ options.
+Run `cfdns.py` without parameters will display an extended CLI guide for additional _show-log_ options.
 
 ## Operation
 
@@ -43,6 +43,8 @@ Configure your prefered scheduler (let's be honest, it's cron, you're going to u
 
 Records are updated if the External IP address does not match, and they are created if they do not exist.  No need to enter your CF dashboard ahead of time.
 
+### Email Notifications 
+
 The monitor will also use the system local `/usr/sbin/sendmail` to send an email after performing updates so you know what it did/changed.  Additionally it includes a heartbeat function.  If the last email sent from the monitor exceeds the configuration value `TIME_TO_NOTIFY` in seconds, a heartbeat email will be generated to let you know the monitor is still working and running.  The heartbeat ensures you don't get surprised that the monitor stopped working three months ago and none of your IPs were ever updated.
 
 ## Why? Doesn't your gateway/router do this?
@@ -53,12 +55,23 @@ The Unifi Network Controller/UDM Pro stack's Dynamic DNS service does not reliab
 
 Unifi stuff is cool when it works, and when it doesn't, just... do it yourself.  For real.
 
-## Stuff
-
-Anything else I think of will go here if I need to.
-
 
 ## Notes/Appendix
+
+### Setting up SMTP Relay via Your GMail Account
+
+In case you don't have SMTP relay/email working on your Linux system, I'm including Linode's guide on setting up  sendmail relay via GMail using postfix and App passwords:
+
+- https://www.linode.com/docs/guides/configure-postfix-to-send-mail-using-gmail-and-google-workspace-on-debian-or-ubuntu/
+
+
+### The Unifi Problem: Slightly More Detailed
+
+For some reason the built-in `inadyn` process gets confused/messed up whenever I add more than one dynamic DNS entry on the Internet/WAN configuration.  The `/run/ddns-eth8-inadyn.conf` config file looks good on review, everything is in order and the API keys are stored normally, but when it runs, you see a lot of 400/403 authentication errors.
+
+```inadyn -n -1 --force -f /run/ddns-eth8-inadyn.conf```
+
+I couldn't really tell if it was using the wrong provider module, messing up the API key, and I decided to start this project instead of trying to mess around with the inadyn config on my UDM Pro.  In the end, I like how this project runs, the config is easy and strong, and I can easily cloud-init it for my DNS/Pi_hole builds.
 
 ### CloudFlare Records Response Structures
 
