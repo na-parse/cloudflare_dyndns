@@ -22,7 +22,7 @@ Create the `.config` file in the same directory as the `cfddns.py` script.  Conf
 }
 ```
 
-The record names are expected in a Fully Qualified Domain Name format and you specify the root A record as the domain name as shown by the example configuration `{"domain": "example.net", "record": "example.net"}` while other records can be specified in FQDN format, or as the hostname and the updater will internally add the domain (`vpn` will be expanded to `vpn.example.net`).
+The record names are expected in a Fully Qualified Domain Name format and you specify the root A record as the domain name as shown by the example configuration `{"domain": "example.net", "record": "example.net"}` while other records can be specified in FQDN format, or as the hostname.  The updater will internally expand base hostnames using the associated domain (The `vpn` example above will be expanded to `vpn.example.net`).
 
 Embedded subdomains are not supported: `{"domain": "example.net", "record": "vpn.external"}`.
 
