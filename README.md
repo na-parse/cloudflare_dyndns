@@ -28,8 +28,8 @@ Embedded subdomains are not supported: `{"domain": "example.net", "record": "vpn
 
 ## Usage
 
-`cfddns.py monitor` - Check for Dynamic DNS updates for configured records
-`cfddns.py show-log` - Show script log/history
+- `cfddns.py monitor` - Check for Dynamic DNS updates for configured records
+- `cfddns.py show-log` - Show script log/history
 
 `cfdns.py` without parameters will display an extended CLI guide for additional _show-log_ options.
 
