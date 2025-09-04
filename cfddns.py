@@ -41,6 +41,7 @@ from enum import Enum, auto
 
 ### Allowed CLI Arguments
 ALLOWED_CLI_ARGS = ['verbose','show']
+APP_NAME = os.path.basename(__file__).replace('.py','')
 
 ### Defaults
 DEFAULT_CONFIG_FILE  = Path(__file__).parent / '.config'
@@ -201,7 +202,7 @@ class LogClass:
             log_file, DEFAULT_LOG_FILE
         )
         self.verbose = verbose
-        self.app_name = os.path.basename(__file__).replace('.py','')
+        self.app_name = APP_NAME
 
     def info(self, msg: str) -> None:
         logmsg = self._mk_logmsg(msg, 'INFO')
@@ -349,7 +350,7 @@ def update_record(session, zone_id, record_id, record_name, ip):
 
 ### Email Handling
 def send_email(send_from: str, send_to: str, notice: str, msg: str):
-    subject = f"[cfddns] {notice}"
+    subject = f"[{APP_NAME}] {notice}"
     email_body = (
         f'To: {send_to}\n'
         f'From: {send_from}\n'
