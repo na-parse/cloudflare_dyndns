@@ -113,7 +113,7 @@ def die(msg: str, verbose: bool = True) -> None:
         
 
 def send_email(send_from: str, send_to: str, notice: str, msg: str):
-    subject = f"[set_root_dns] {notice}"
+    subject = f"[cfddns] {notice}"
     email_body = (
         f'To: {send_to}\n'
         f'From: {send_from}\n'
