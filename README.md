@@ -1,20 +1,25 @@
 # cloudflare_DynDNS
 
-Python base script to automate Dynamic DNS WAN IP assignment updates for Cloudflare hosted DNS records.  Built because the Unifi built-in dynamic DNS does not behave well with my configuration.
+Python-based script to automate Dynamic DNS WAN IP assignment updates for
+Cloudflare-hosted DNS records. Built because the UniFi built-in Dynamic DNS does
+not behave well with my configuration.
 
-Primarily intended for personal use but if someone else wants to use it, feel free to submit feedback/issues/etc on the github page: https://github.com/na-parse/cloudflare_dyndns
+Primarily intended for personal use, but if someone else wants to use it, feel
+free to submit feedback/issues/etc. on the GitHub page:
+https://github.com/na-parse/cloudflare_dyndns
 
 ## Configuration
 
-Create the `.config` file in the same directory as the `cfddns.py` script.  Configuration is defined in JSON format:
+Create a `.config` file in the same directory as the `cfddns.py` script.
+Configuration is defined in JSON format:
 
 ```json
 {
     "CF_API_TOKEN": "<cloudflare_api_token>",
     "RECORDS": [
+        {"domain": "example.net", "record": "vpn"},
         {"domain": "example.net", "record": "example.net"},
-        {"domain": "example.net", "record": "wanip.example.net"},
-        {"domain": "example.net", "record": "vpn"}
+        {"domain": "example.net", "record": "wanip.example.net"}
     ],
     "TIME_TO_NOTIFY": 604800,
     "SENDFROM": "dns-monitor@example.com",
@@ -22,60 +27,114 @@ Create the `.config` file in the same directory as the `cfddns.py` script.  Conf
 }
 ```
 
-The record names are expected in a Fully Qualified Domain Name format and you specify the root A record as the domain name as shown by the example configuration `{"domain": "example.net", "record": "example.net"}` while other records can be specified in FQDN format, or as the hostname.  The updater will internally expand base hostnames using the associated domain (The `vpn` example above will be expanded to `vpn.example.net`).
+### Cloudflare API Token
 
-Embedded subdomains are not supported: `{"domain": "example.net", "record": "vpn.external"}`.
+The API token must have view and edit permissions for all domains being
+monitored and updated by `cfddns`. No support for per-domain tokens is planned
+at this time.
+
+### RECORDS
+
+```json
+{ "domain": "<domain>", "record": "<record>" }
+```
+
+- `domain`: The exact domain name as shown in your Cloudflare console.
+- `record`: Can be specified in three ways:
+  - `hostname` — Hostname for the DNS A record to be updated
+  - `example.com` — Specify the domain/zone name to set the root A record
+  - `hostname.example.com` — Fully qualified hostname
+
+Embedded subdomains are **not supported**. For example:
+
+```json
+{"domain": "example.net", "record": "vpn.external"}
+```
+
+is invalid.
+
+### Monitoring Values
+
+- `TIME_TO_NOTIFY`: Integer value in seconds specifying how long `cfddns` should
+  wait before sending a heartbeat email to confirm it is still running as
+  scheduled. Example: `604800` seconds = 7 days.
+- `SENDFROM`: Email address used in the `From:` field when sending emails.
+- `SENDTO`: Recipient email address for update and heartbeat notifications.
 
 ## Usage
 
-- `cfddns.py monitor` - Check for Dynamic DNS updates for configured records
-- `cfddns.py show-log` - Show script log/history
-
-Run `cfdns.py` without parameters will display an extended CLI guide for additional _show-log_ options.
+- `cfddns.py` — Perform Dynamic DNS monitoring and updates for configured
+  records
+- `cfddns.py verbose` — Enable verbose debug messaging
+- `cfddns.py show` — Display the current configuration
 
 ## Operation
 
-Configure your prefered scheduler (let's be honest, it's cron, you're going to use cron) to run `cfddns.py monitor` at your desired interval for maintaining your dynamic DNS entries.  When in doubt, `*/15` is probably good enough.
+Configure your preferred scheduler (most likely `cron`) to run
+`cfddns.py monitor` at your desired interval for maintaining dynamic DNS
+entries. A 15-minute interval is generally sufficient:
 
 ```bash
-*/15 * * * *   /path/to/cloudflare_dyndns/cfddns.py monitor
+*/15 * * * * /path/to/cloudflare_dyndns/cfddns.py
 ```
 
-Records are updated if the External IP address does not match, and they are created if they do not exist.  No need to enter your CF dashboard ahead of time.
+Records are updated if the external IP address does not match, and they are
+created if they do not exist. No need to pre-create records in the Cloudflare
+dashboard.
 
-### Email Notifications 
+### Email Notifications
 
-The monitor will also use the system local `/usr/sbin/sendmail` to send an email after performing updates so you know what it did/changed.  Additionally it includes a heartbeat function.  If the last email sent from the monitor exceeds the configuration value `TIME_TO_NOTIFY` in seconds, a heartbeat email will be generated to let you know the monitor is still working and running.  The heartbeat ensures you don't get surprised that the monitor stopped working three months ago and none of your IPs were ever updated.
+The monitor uses the system-local `/usr/sbin/sendmail` to send an email after
+performing updates so you know what was changed. It also includes a heartbeat
+function: if the last email sent exceeds the configured `TIME_TO_NOTIFY` value,
+a heartbeat email is generated to confirm the monitor is still running. This
+prevents surprises if the monitor stops working silently.
 
-## Why? Doesn't your gateway/router do this?
+### Logging
 
-My home network runs a heavy Unifi stack from Ubiquity, including a Unifi Dream Machine Pro (UDM Pro) as the primary gateway device.
+The monitor stores a log file in the same directory as the `cfddns.py` script
+called `cfddns_activity.log`.
 
-The Unifi Network Controller/UDM Pro stack's Dynamic DNS service does not reliably update or set root records for my domains.  Rather than mess around with a broken service I can't control or keep fixed even if I fix it once, I figured I'd write my own monitoring and updating service.
+## Why Not Use the Router’s Built-In Dynamic DNS?
 
-Unifi stuff is cool when it works, and when it doesn't, just... do it yourself.  For real.
+My home network runs a UniFi stack from Ubiquiti, including a UniFi Dream
+Machine Pro (UDM Pro) as the primary gateway device.
 
+The UniFi Network Controller/UDM Pro stack’s Dynamic DNS service does not
+reliably update or set root records for my domains. Rather than troubleshoot a
+service I cannot fully control, I wrote my own monitoring and updating service.
 
-## Notes/Appendix
+UniFi is great when it works. When it doesn’t—just do it yourself.
 
-### Setting up SMTP Relay via Your GMail Account
+## Notes / Appendix
 
-In case you don't have SMTP relay/email working on your Linux system, I'm including Linode's guide on setting up  sendmail relay via GMail using postfix and App passwords:
+### Setting up SMTP Relay via Gmail
+
+If you don’t have SMTP relay/email working on your Linux system, see Linode’s
+guide on setting up sendmail relay via Gmail using Postfix and App Passwords:
 
 - https://www.linode.com/docs/guides/configure-postfix-to-send-mail-using-gmail-and-google-workspace-on-debian-or-ubuntu/
 
+### The UniFi Problem: More Detail
 
-### The Unifi Problem: Slightly More Detailed
+The built-in `inadyn` process fails whenever I add more than one dynamic DNS
+entry on the WAN configuration. The
+`/run/ddns-eth8-inadyn.conf` file looks correct, and the API keys are stored
+normally, but when it runs, many 400/403 authentication errors appear.
 
-For some reason the built-in `inadyn` process gets confused/messed up whenever I add more than one dynamic DNS entry on the Internet/WAN configuration.  The `/run/ddns-eth8-inadyn.conf` config file looks good on review, everything is in order and the API keys are stored normally, but when it runs, you see a lot of 400/403 authentication errors.
+```bash
+inadyn -n -1 --force -f /run/ddns-eth8-inadyn.conf
+```
 
-```inadyn -n -1 --force -f /run/ddns-eth8-inadyn.conf```
+It’s unclear whether it uses the wrong provider module or mishandles the API
+key. Instead of debugging `inadyn` on the UDM Pro, I built this project. The
+result is a cleaner, more reliable, and easily cloud-init–deployable solution
+for DNS/Pi-hole builds.
 
-I couldn't really tell if it was using the wrong provider module, messing up the API key, and I decided to start this project instead of trying to mess around with the inadyn config on my UDM Pro.  In the end, I like how this project runs, the config is easy and strong, and I can easily cloud-init it for my DNS/Pi_hole builds.
+### Cloudflare Records Response Example
 
-### CloudFlare Records Response Structures
+`get_record()` response:
 
-`get_record()`:
 ```json
 {
   "id": "123456782345678790a",

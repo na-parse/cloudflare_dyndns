@@ -11,13 +11,15 @@ WAN IP, then checks all configured domains for matching record settings.
 Any configured records that do not match the current IP are updated.
 
 Configuration file is '.config' and uses JSON to define:
-    CF_API_TOKEN - str - API key value to use for cloudflare operations
-    RECORDS - list - List format of records to dynamically update
-        RECORDS_ITEM - dict - { 'domain': <domain>, 'record': <record_name> }
-    TIME_TO_NOTIFY - int - Time (in seconds) between "I'm still running" emails
-    SENDFROM - str - Sender email address
-    SENDTO - str - Send-to email address
-
+{  
+    "CF_API_TOKEN": <Cloudflare API Token with zone view-edit permissions>,
+    "RECORDS": [
+        {'domain': zone_name, 'record': hostname}, ...
+    ],
+    TIME_TO_NOTIFY: <int in seconds for heartbeat interval based on lastsent>,
+    SENDFROM: <Email address to use as From:>,
+    SENDTO: <Email address of recipient for updates/heartbeats
+}
 See README.md for further details on configuration
 '''
 # Disabling warnings from urllib3 because I use a Mac and Apple mucks things up
@@ -35,14 +37,77 @@ from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from enum import Enum, auto
 
-ARGUMENTS = ['monitor','show-log']
+### Allowed CLI Arguments
+ALLOWED_CLI_ARGS = ['verbose','show']
 
+### Defaults
+DEFAULT_CONFIG_FILE  = Path(__file__).parent / '.config'
+DEFAULT_HISTORY_FILE = Path(__file__).parent / '.history'
+DEFAULT_LOG_FILE     = Path(__file__).parent / 'cfddns_activity.log'
+
+### Utility definitions
+def die(msg: str, verbose: bool = True, exit_code: int = 1) -> None:
+    '''
+    Fatal Event Handler - Prints message to console and logs message
+      to the event log.  Exits with specified (non-zero) exit code.
+    '''
+    try: log.info(f'FATAL - {msg}')
+    except: pass    
+    if verbose: print(f'[FATAL] {msg}')
+    if not isinstance(exit_code,int) or exit_code == 0:
+        exit(1)
+    exit(exit_code)
+
+def dmesg(msg: str) -> None:
+    ''' Debugging only - calls to dmesg should be removed before push '''
+    print(f'D: {msg}')    
+
+def get_datestr(timestamp: float) -> str:
+    ''' Return a nicely formatted datestring for a given timestamp '''
+    return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
+
+def sanitize_file_path(path_arg: Path, default_value: Path = None) -> Path:
+    ''' 
+    Santize and ensure path is a Path object, and handle default value
+    assignment for method arguments.
+    '''
+    if path_arg is None and default_value is None:
+        print(f'Unable to sanitize a None-type path value',file=sys.stderr)
+        exit(2)
+    return Path(path_arg or default_value)
+
+def sanitize_record(record: str, domain: str) -> str:
+    ''' Sanitize DNS record name to ensure fully qualified '''
+    if '.' in record and not record.endswith(domain):
+        print(
+            f'Invalid record definition for RECORD item: {domain=}, {record=}',
+            file=sys.stderr
+            )
+    if not '.' in record: 
+        record = f'{record}.{domain}'
+    return record
+
+### cfddns Operational Objects
 class ConfigClass:
+    '''
+    Configuration Handler
+    Reads in the configuration file and sets class attributes per
+    configuration file's JSON data.
+
+    Arguments:
+        config_file (opt) - Uses DEFAULT_CONFIG_FILE path by default
+    
+    config_file JSON Expected Values:
+        CF_API_TOKEN: str - Cloudflare API Token with zone view-edit perms
+        RECORDS: list - dict objects {domain: zone, record_name: host}
+        TIME_TO_NOTIFY: int - Seconds from lastsent timestamp for hb email
+        SENDTO: str - Email address recipient for updates/heartbeat emails
+        SENDFROM: str - Email address to use as originator for emails
+    '''
     def __init__(self, config_file: Path = None):
-        if config_file is None:
-            config_file = Path(__file__).parent / '.config'
-        config_file = Path(config_file)
+        config_file = sanitize_file_path(config_file, DEFAULT_CONFIG_FILE)
         if not config_file.is_file():
             die(f'Unable to find {str(config_file)}')
         try:
@@ -57,20 +122,48 @@ class ConfigClass:
             die(
                 f'Error while reading/processing config file {str(config_file)}'
                 f'\n--\n{e}'
-            )            
+            )          
+    def __str__(self):
+        out = (
+            f'Current Configuration Values:  \n'
+            f'   CF_API_TOKEN={self.CF_API_TOKEN}\n'
+            f'   RECORDS: \n'
+        )
+        for item in self.RECORDS:
+            out += (
+                f'        domain={item["domain"]} - record={item["record"]}\n'
+            )
+        out += (
+            f'    TIME_TO_NOTIFY={self.TIME_TO_NOTIFY}\n'
+            f'    SENDTO={self.SENDTO}\n'
+            f'    SENDFROM={self.SENDFROM}'
+        )
+        return out
+
 
 class HistoryClass:
-    def __init__(self, history_file: Path = None):
-        if history_file is None:
-            history_file = Path(__file__).parent / '.history'
-        self.history_file = history_file
-        self.data = self._load_history()
+    '''
+    Tracking object for operation behaviors and internal logic control.
+    Currently only being used to track when last email was sent for 
+    heartbeat purposes.
     
+    TODO: Track configured DNS entries so we can tell when things are
+          removed or added.
+    '''
+    def __init__(self, history_file: Path = None):
+        self.history_file = sanitize_file_path(
+            history_file, DEFAULT_HISTORY_FILE
+        )
+        self.data = self._load_history()
+
+    def get(self,data_key, default_value: Any = None) -> Any:
+        return self.data.get(data_key,default_value)
+
     def update(self,data_key,data_value) -> None:
         self.data[data_key] = data_value
-        self.flush_data()
+        self._flush_data()
     
-    def flush_data(self) -> None:
+    def _flush_data(self) -> None:
         try:
             with open(self.history_file,'w') as f:
                 _ = json.dump(self.data, f)
@@ -79,39 +172,182 @@ class HistoryClass:
                 f'Error while updating history file: {str(self.history_file)}'
                 f'\n--\n{e}'
             )
-    
-    def log(self, msg: str) -> None:
-        if (
-            self.data.get('log',None) is None
-            or not isinstance(self.data.get('log',None),dict)
-        ):
-            self.data['log'] = {}
-        self.data['log'][time.time()] = msg
-        self.flush_data()
-
-    def get(self,data_key, default_value: Any = None) -> Any:
-        return self.data.get(data_key,default_value)
 
     def _load_history(self):
         data = {}
-        history_file = Path(self.history_file)
-        if history_file.exists():
+        if self.history_file.exists():
             try:
-                with open(history_file,'r') as f:
+                with open(self.history_file,'r') as f:
                     data = json.load(f)  
             except Exception as e:
                 print(f'Issue with history file, resetting...')
-                os.remove(history_file)
+                os.remove(self.history_file)
         return data
 
 
+class LogClass:
+    '''
+    Could I use the python logging module?  Yes.  Did I?  No.
+    This is actually because I already wrote a json logging thing but decided
+    to roll it back to a flat log file.  One day I'll start using logging.
+    But not today.
 
+    Methods:
+        .info(msg)  - Logs message to log file (print if verbose)
+        .debug(msg) - Prints and logs msg only if verbose)
+    '''
+    def __init__(self, log_file: Path = None, verbose: bool = False):
+        self.log_file = sanitize_file_path(
+            log_file, DEFAULT_LOG_FILE
+        )
+        self.verbose = verbose
+        self.app_name = os.path.basename(__file__).replace('.py','')
 
-def die(msg: str, verbose: bool = True) -> None:
-    if verbose: print(f'[FATAL] {msg}')
-    exit(1)
+    def info(self, msg: str) -> None:
+        logmsg = self._mk_logmsg(msg, 'INFO')
+        if self.verbose: print(logmsg)
+        self._flush(logmsg)
+
+    def debug(self, msg: str) -> None:
+        if not self.verbose: return
+        logmsg = self._mk_logmsg(msg, 'DEBUG')
+        print(logmsg)
+        self._flush(logmsg)
+    
+    def show(self, reverse=False, limit=None) -> str:
+        '''
+        Returns log messages from the log file based on args.
+        Provides recent log messages for the heartbeat activity report.
+        '''
+        try:
+            with open(self.log_file,'r') as f:
+                lines = [ l.strip() for l in f.readlines() ]
+        except FileNotFoundError:
+            lines = []
         
+        lines.sort(reverse=reverse)
+        limit = limit or len(lines)
+        return "\n".join(lines[0:limit])
+    
+    def _mk_logmsg(self, msg: str, level: str = "INFO") -> str:
+        return (
+            f'[{get_datestr(time.time())}] {self.app_name} - '
+            f'{level} - {msg}'
+        )
+    
+    def _flush(self, logmsg) -> None:
+        try:
+            with open(self.log_file,'a') as f:
+                print(logmsg,file=f)
+        except Exception as e:
+            # Print an error message but let the monitor keep running
+            print(
+                f'Error while writing to log file: {e}',
+                file=sys.stderr
+            )
 
+
+##### API Endpoint Management
+
+class HttpMethod(Enum):
+    GET = auto()
+    POST = auto()
+    PUT = auto()
+
+def api_request(
+    method: HttpMethod,
+    url: str,
+    session: requests.Session = None,
+    params: dict = None,
+    json: dict = None
+) -> requests.Response:
+    ''' 
+    Wrapper for API calls to centralize exception and error handling.
+    cfddns behavior is to log the error/issue in history log and
+    exit in a non-zero status without any console output.
+    '''
+    # Setup the headers to explicitly state JSON
+    if not session: session = requests.Session()
+    session.headers.update({
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    })
+    if method == HttpMethod.GET: apifunc = session.get
+    if method == HttpMethod.POST: apifunc = session.post
+    if method == HttpMethod.PUT: apifunc = session.put
+
+    try:
+        log.debug(
+            f'Making API Request - {method.name} - {url} {params=} {json=}'
+        )
+        response = apifunc(url, params=params, json=json)
+        response.raise_for_status()
+        # Flag if we're missing json response data
+        _ = response.json()
+        return response
+    except Exception as e:
+        die(f'API_REQUEST Failed - {e}', exit_code=99)
+
+
+def get_external_ip() -> str:
+    r = api_request(
+        HttpMethod.GET, "https://api.ipify.org", params={'format': 'json'}
+    )
+    return r.json()["ip"]
+
+def get_zone_id(session, zone_name):
+    r = api_request(
+        HttpMethod.GET,
+        "https://api.cloudflare.com/client/v4/zones",
+        session=session,
+        params={"name": zone_name},
+    )
+    zones = r.json()["result"]
+    if not zones:
+        die(f'Zone not found/authorized for this account: {zone_name}')
+    return zones[0]["id"]
+
+def get_record_id(session, zone_id, record_name):
+    r = api_request(
+        HttpMethod.GET,
+        f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records",
+        session=session,
+        params={"type": "A", "name": record_name}
+    )
+    records = r.json()["result"]
+    if not records:
+        return None
+    return records[0]["id"]
+
+def get_record(session, zone_id, record_name):
+    r = api_request(
+        HttpMethod.GET,
+        f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records",
+        session=session,
+        params={"type": "A", "name": record_name},
+    )
+    records = r.json()["result"]
+    if not records:
+        return None
+    return records[0]
+
+def update_record(session, zone_id, record_id, record_name, ip):
+    url = f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records"
+    if record_id:
+        url = f"{url}/{record_id}"
+        method = HttpMethod.PUT
+    else:
+        method = HttpMethod.POST
+    r = api_request(
+        method,
+        url,
+        session=session,
+        json={"type": "A", "name": record_name, "content": ip, "ttl": 300},
+    )
+    return r.json()
+
+
+### Email Handling
 def send_email(send_from: str, send_to: str, notice: str, msg: str):
     subject = f"[cfddns] {notice}"
     email_body = (
@@ -140,84 +376,24 @@ def send_email(send_from: str, send_to: str, notice: str, msg: str):
     history.update('lastsent',time.time())
 
 
-def web_get(url: str, params: dict = {}) -> requests.Response:
-    try:
-        r = requests.get(url, params=params)
-        r.raise_for_status()
-        return r
-    except Exception as e:
-        history.log(f'GET {url} [{params}] failed - {e}')
-        exit(1)
-
-
-def get_external_ip() -> str:
-    r = requests.get("https://api.ipify.org?format=json")
-    r.raise_for_status()
-    return r.json()["ip"]
-
-def get_zone_id(session, zone_name):
-    r = session.get(
-        "https://api.cloudflare.com/client/v4/zones",
-        params={"name": zone_name},
-    )
-    r.raise_for_status()
-    zones = r.json()["result"]
-    if not zones:
-        raise RuntimeError("Zone not found")
-    return zones[0]["id"]
-
-def get_record_id(session, zone_id, record_name):
-    r = session.get(
-        f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records",
-        params={"type": "A", "name": record_name},
-    )
-    r.raise_for_status()
-    records = r.json()["result"]
-    if not records:
-        return None
-    return records[0]["id"]
-
-def get_record(session, zone_id, record_name):
-    r = session.get(
-        f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records",
-        params={"type": "A", "name": record_name},
-    )
-    r.raise_for_status()
-    records = r.json()["result"]
-    if not records:
-        return None
-    return records[0]
-
-
-def update_record(session, zone_id, record_id, record_name, ip):
-    url = f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records"
-    if record_id:
-        url = f"{url}/{record_id}"
-        method = session.put
-    else:
-        method = session.post
-    r = method(
-        url,
-        json={"type": "A", "name": record_name, "content": ip, "ttl": 300},
-    )
-    r.raise_for_status()
-    return r.json()
-
-
-def get_datestr(timestamp: float) -> str:
-    return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
-
-
+### Heartbeat for Active Monitoring Confirmation
 def heartbeat() -> bool:
-    ''' Check if we need to send a 'still running' heartbeat '''
+    ''' 
+    Check if a heartbeat is necessary based on the duration since the last
+    user notification email was sent. 
+    '''
     now = time.time()
     lastsent = history.get('lastsent', 0)
     if lastsent + config.TIME_TO_NOTIFY < now:
+        log.debug(f'Heartbeat required - Last Sent {get_datestr(lastsent)}')
         return True
     return False
 
+
+### Notification Senders
+
 def send_heartbeat() -> None:
-    ''' Send the heartbeat '''
+    ''' Send a notification heartbeat email '''
     last_hb = get_datestr(history.get("lastsent",0))
     rightnow = get_datestr(time.time())
     send_email(
@@ -228,13 +404,13 @@ def send_heartbeat() -> None:
             f"DynamicDNS Updater Heartbeat:\n"
             f"- Last HB: {last_hb}\n"
             f"--\n{json.dumps(config.RECORDS,indent=2)}\n--\n"
-            f"Latest Logs:\n{show_log(reverse=True,limit=10)}"
+            f"Latest Logs:\n{log.show(reverse=True,limit=10)}"
         )
     )
-    history.log(f'Sent heartbeat email to {config.SENDTO}')
+    log.info(f'Sent heartbeat email to {config.SENDTO}')
 
 def send_update_notice(msg) -> None:
-    ''' Email notifying of an update '''
+    ''' Send a notification of update email '''
     rightnow = get_datestr(time.time())
     send_email(
         config.SENDFROM,
@@ -245,45 +421,14 @@ def send_update_notice(msg) -> None:
             f"{msg}"
         )
     )
-
-def sanitize_record(record: str, domain: str) -> str:
-    ''' Sanitize record name to ensure fully qualified '''
-    if '.' in record and not record.endswith(domain):
-        die(f'Invalid record definition for RECORD item: {domain=}, {record=}')
-    if not '.' in record: record = f'{record}.{domain}'
-    return record
+    log.info(f'Sent DNS update email to {config.SENDTO}')
 
 
-def show_log(reverse = False,limit: int = None) -> str:
-    ''' 
-    Returns log message content as a str based on parameters as newline
-    separated log messages
-    '''
-    logs = history.get('log',{})
-    if not logs:
-        return f'No logs...\n'
-
-    log_index = list(logs.keys())
-
-    if limit:
-        # limit is always based around most-recent
-        log_index.sort(reverse=True)
-        log_index = log_index[0:limit]
-
-    # Now apply output sort order
-    log_index.sort(reverse=reverse)
-    output = ''
-    for index in log_index:
-        timestamp = float(index)
-        output += f'{get_datestr(timestamp)} - {logs[index]}\n'
-
-    return output
-
-
-def main() -> None:
+### Main Monitoring Pass Function
+def ddns_monitor() -> None:
     output_type = None
     output_msg = ''
-    if heartbeat(): output_type = 'heartbeat'    
+    if heartbeat(): output_type = 'heartbeat'
     ip = get_external_ip()
     
     session = requests.Session()
@@ -305,68 +450,60 @@ def main() -> None:
         except: 
             record_ip = None
             record_id = None
-            history.log(f'DNS entry missing for {domain=}, {record_name=}')
+            log.info(f'DNS entry missing for {domain=}, {record_name=}')
 
         if not record_ip == ip:
             # Flag for update processing at the end
             output_type = 'update'
+            action_type = "Updated" if record_ip else "New Record"
             output_msg += (
-                f'- {domain=}'
-                f'  - {record_ip=} -> WAN_IP {ip}\n'
+                f'{action_type}: {record_name} (zone: {domain}) '
+                f'{record_ip} -> WAN_IP {ip}\n'
             )
             result = update_record(session, zone_id, record_id, record_name, ip)
             output_msg += (
-                f'\nResponse Data:\n{json.dumps(result,indent=2)}\n\n'
+                f'Response Data:\n{json.dumps(result,indent=2)}\n\n'
             )
-            history.log(f'Updated DNS entry for {record_name=} from {record_ip=} -> {ip}')
+            log.info(f'Updated DNS entry "{record_name}" from {record_ip} -> {ip}')
 
     # Handle output conditions on exit
-    
     if output_type == 'heartbeat':
         send_heartbeat()
 
     if output_type == 'update':
         send_update_notice(output_msg)
 
+    if output_type is None:
+        log.debug(f'No updates performed.  Normal exit.')
 
-''' Module Onload Operations '''
+
+### Script On-Load Execution
+
+# Define module level operations class instances
+log = LogClass()
+config = ConfigClass()
+history = HistoryClass()
+
 # Usage check section
 def usage() -> None:
     script_name = os.path.basename(__file__)
     print(
-        f'Usage error: {script_name} {{monitor|show-log [options]}}\n'
-        f'\tmonitor - perform dynamic DNS update check\n'
-        f'\tshow-log - show activity log\n'
-        f'\t\toptions:   reverse - show logs newest to oldest\n'
-        f'\t\t           limit:# - limit logs listed to # most recent\n'
-        f'\t\texample:\n'
-        f'\t\t         > {script_name} show-log reverse limit:10\n'
-        f'\t\t           - Show 10 most recent logs newest-to-oldest'
+        f'Usage error: {script_name} {{verbose|show}}\n'
+        f'    verbose -  log debugging messages and print to console\n'
+        f'    show    -  Show the current configuration values\n'
     )
     exit(1)
 
-if len(sys.argv) < 2: usage()
-if not sys.argv[1].lower() in ARGUMENTS: usage()
-
-config = ConfigClass()
-history = HistoryClass()
+if len(sys.argv) > 1:
+    if not sys.argv[1].lower() in ALLOWED_CLI_ARGS: usage()
+    if 'verbose' in sys.argv[1].lower():
+        log.verbose = True
+        log.debug(f'Enabling verbose output')
+    if 'show' in sys.argv[1].lower():
+        print(config)
+        exit(0)
 
 if __name__ == '__main__':
-    if sys.argv[1].lower() == 'monitor': 
-        main()
-        exit(0)
-    
-    if sys.argv[1].lower() == 'show-log':
-        limit = None
-        reverse = False    
-        if 'reverse' in [x.lower() for x in sys.argv]:
-            reverse = True
-        for arg in sys.argv[2:]:
-            if arg.startswith('limit:'):
-                try:
-                    limit = int(arg.split(':',1)[1])
-                except:
-                    usage()
-        print(show_log(reverse=reverse,limit=limit))
-        exit(0)
-
+    log.debug(f'Starting cloudflare_dyndns monitoring and update run')    
+    ddns_monitor()
+    exit(0)
