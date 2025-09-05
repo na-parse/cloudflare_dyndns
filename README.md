@@ -71,7 +71,7 @@ is invalid.
 ## Operation
 
 Configure your preferred scheduler (most likely `cron`) to run
-`cfddns.py monitor` at your desired interval for maintaining dynamic DNS
+`cfddns.py` at your desired interval for maintaining dynamic DNS
 entries. A 15-minute interval is generally sufficient:
 
 ```bash
