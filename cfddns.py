@@ -48,6 +48,9 @@ DEFAULT_CONFIG_FILE  = Path(__file__).parent / '.config'
 DEFAULT_HISTORY_FILE = Path(__file__).parent / '.history'
 DEFAULT_LOG_FILE     = Path(__file__).parent / 'cfddns_activity.log'
 
+### TODO: Config
+FAILURES_BEFORE_ALERT = 3
+
 ### Utility definitions
 def die(msg: str, verbose: bool = True, exit_code: int = 1) -> None:
     '''
@@ -152,6 +155,8 @@ class HistoryClass:
           removed or added.
     '''
     def __init__(self, history_file: Path = None):
+        self.run_id = time.time()
+
         self.history_file = sanitize_file_path(
             history_file, DEFAULT_HISTORY_FILE
         )
@@ -164,6 +169,22 @@ class HistoryClass:
         self.data[data_key] = data_value
         self._flush_data()
     
+    def add_failure(self) -> int:
+        ''' 
+        Track current run as a failure and return current failure count as int
+        '''
+        failures = self.data.get('failures',{})
+        failures[self.run_id] = True
+        self.update('failures',failures)
+        return len(failures)
+    
+    def clear_failures(self) -> None:
+        '''
+        Clear all failure events and details
+        '''
+        self.update('failures',{})
+        self.update('failure_sent',0)
+
     def _flush_data(self) -> None:
         try:
             with open(self.history_file,'w') as f:
@@ -282,7 +303,21 @@ def api_request(
             f'Making API Request - {method.name} - {url} {params=} {json=}'
         )
         response = apifunc(url, params=params, json=json)
+        
+        # Check for random internal server errors
+        if response.status_code == 500:
+            '''
+            API busy or temporarily unavailable.  Handle silently and try again
+            later until consecutive errors exceed the threshold.
+            '''
+            failure_count = history.add_failure()
+            print(f'{failure_count=}')  
+            log.info(f'FATAL API_REQUEST failed [500] - {url} [{failure_count}]')
+            if failure_count > FAILURES_BEFORE_ALERT:
+                send_failure_notification()
+            exit(1)
         response.raise_for_status()
+
         # Flag if we're missing json response data
         _ = response.json()
         return response
@@ -410,6 +445,28 @@ def send_heartbeat() -> None:
     )
     log.info(f'Sent heartbeat email to {config.SENDTO}')
 
+def send_failure_notification() -> None:
+    ''' Send notification of excessive API failures '''
+    failure_sent = history.get('failure_sent',0)
+    failure_count = len(history.get('failures',[]))
+    if failure_sent > 0: 
+        # Failure has already been sent, exit
+        exit(1)
+    send_email(
+        config.SENDFROM,
+        config.SENDTO,
+        notice=f'Excessive API Failures Updating DNS',
+        msg=(
+            f"Experiencing excessive API failures - {failure_count}\n"
+            f"--\n{json.dumps(config.RECORDS,indent=2)}\n--\n"
+            f"Latest Logs:\n{log.show(reverse=True,limit=20)}"
+        )
+    )
+    history.update('failure_sent',time.time())
+    log.info(f'Sent excessive failures email to {config.SENDTO}')
+    exit(1)
+
+
 def send_update_notice(msg) -> None:
     ''' Send a notification of update email '''
     rightnow = get_datestr(time.time())
@@ -476,6 +533,10 @@ def ddns_monitor() -> None:
 
     if output_type is None:
         log.debug(f'No updates performed.  Normal exit.')
+
+    # Normal exit - Clean up any previous API failures
+    history.clear_failures()
+
 
 
 ### Script On-Load Execution
