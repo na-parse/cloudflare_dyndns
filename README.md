@@ -85,10 +85,27 @@ dashboard.
 ### Email Notifications
 
 The monitor uses the system-local `/usr/sbin/sendmail` to send an email after
-performing updates so you know what was changed. It also includes a heartbeat
-function: if the last email sent exceeds the configured `TIME_TO_NOTIFY` value,
-a heartbeat email is generated to confirm the monitor is still running. This
-prevents surprises if the monitor stops working silently.
+performing updates so you know what was changed. There are three types of 
+notification emails cfddns can send:
+
+#### Updates
+
+Triggered whenever a configured DNS record is updated or created.
+
+#### Heartbeat
+
+Based on the `TIME_TO_NOTIFY` setting, cfddns will send a _heartbeat_ email to
+confirm the system is running normally.  Includes the most recent log messages.
+
+#### Errors
+
+Errors are treated as transient and result in a silent exit normally due to the
+unreliable nature of API end points (sporadic timeouts, 500/503 server issues)
+and will instead be tracked internally and logged.
+
+If three (TODO: add config element) consecutive runs result in errors, an alert
+email will be generated.  No further alert emails will be generated unless
+cfddns completes a normal run and resets the error counters.
 
 ### Logging
 
