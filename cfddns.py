@@ -393,7 +393,7 @@ def get_external_ip() -> str:
 def get_zone_id(session, zone_name):
     r = api_request(
         HttpMethod.GET,
-        "https://api.cloudflaxre.com/client/v4/zones",
+        "https://api.cloudflare.com/client/v4/zones",
         session=session,
         params={"name": zone_name},
     )
