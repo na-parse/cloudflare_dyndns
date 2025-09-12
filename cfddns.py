@@ -39,6 +39,8 @@ from pathlib import Path
 from typing import Any
 from enum import Enum, auto
 
+HEARTBEAT_REQUIRED = False
+
 ### Allowed CLI Arguments
 ALLOWED_CLI_ARGS = ['verbose','show']
 APP_NAME = os.path.basename(__file__).replace('.py','')
@@ -50,18 +52,31 @@ DEFAULT_LOG_FILE     = Path(__file__).parent / 'cfddns_activity.log'
 
 ### TODO: Config
 FAILURES_BEFORE_ALERT = 3
+DELAY_AFTER_ERROR = 60 * 60 # 1 Hour
+
 
 ### Utility definitions
-def die(msg: str, verbose: bool = True, exit_code: int = 1) -> None:
+def die(
+    msg: str, 
+    verbose: bool = True, 
+    exit_code: int = 1, 
+    cleanup = None
+) -> None:
     '''
     Fatal Event Handler - Prints message to console and logs message
       to the event log.  Exits with specified (non-zero) exit code.
+    If cleanup is specified and callable, it will be called before exting.
     '''
-    try: log.info(f'FATAL - {msg}')
-    except: pass    
-    if verbose: print(f'[FATAL] {msg}')
+    # Try to log but don't raise an exception if something is wrong
+    # with the logger
+    try: log.fatal(f'{msg}')
+    except: raise
+
+    if verbose: print(f'[FATAL] Exiting: {msg}')
+    if callable(cleanup): cleanup()
+
     if not isinstance(exit_code,int) or exit_code == 0:
-        exit(1)
+        exit(7)
     exit(exit_code)
 
 def dmesg(msg: str) -> None:
@@ -92,6 +107,29 @@ def sanitize_record(record: str, domain: str) -> str:
     if not '.' in record: 
         record = f'{record}.{domain}'
     return record
+
+def check_for_delay() -> bool:
+    '''
+    Checks if a delay has been set in response to a previous runtime error.
+    Clears any existing delay timer for an expired timer was set.
+
+    Returns:
+        True - Delay timer exists and has not expired
+        False - Delay timer does not exist or has expired
+    '''
+    delay_nextrun = history.get('delay_nextrun',None)
+    if delay_nextrun and delay_nextrun > time.time():
+        # Delay is set and has not expired
+        return True
+    elif delay_nextrun and delay_nextrun < time.time():
+        # Delay is set and expired
+        log.debug(f'Delay timner for {get_datestr(delay_nextrun)} has expired.')
+        history.update('delay_nextrun',0)
+    # No delay applicable
+    return False
+
+
+
 
 ### cfddns Operational Objects
 class ConfigClass:
@@ -169,13 +207,18 @@ class HistoryClass:
         self.data[data_key] = data_value
         self._flush_data()
     
-    def add_failure(self) -> int:
+    def add_failure(self, delay: int = None) -> int:
         ''' 
         Track current run as a failure and return current failure count as int
         '''
+        # Setup the next-run delay threshold for an error
+        delay = delay or DELAY_AFTER_ERROR
+        delay_until = time.time() + delay
         failures = self.data.get('failures',{})
         failures[self.run_id] = True
         self.update('failures',failures)
+        self.update('delay_nextrun',delay_until)
+        log.info(f'Failure detected - delaying next run until {get_datestr(delay_until)}')
         return len(failures)
     
     def clear_failures(self) -> None:
@@ -225,6 +268,11 @@ class LogClass:
         self.verbose = verbose
         self.app_name = APP_NAME
 
+    def fatal(self, msg: str) -> None:
+        logmsg = self._mk_logmsg(msg, 'FATAL')
+        if self.verbose: print(logmsg)
+        self._flush(logmsg)
+
     def info(self, msg: str) -> None:
         logmsg = self._mk_logmsg(msg, 'INFO')
         if self.verbose: print(logmsg)
@@ -247,7 +295,7 @@ class LogClass:
         except FileNotFoundError:
             lines = []
         
-        lines.sort(reverse=reverse)
+        if reverse: lines.reverse()
         limit = limit or len(lines)
         return "\n".join(lines[0:limit])
     
@@ -288,6 +336,7 @@ def api_request(
     cfddns behavior is to log the error/issue in history log and
     exit in a non-zero status without any console output.
     '''
+    global HEARTBEAT_REQUIRED
     # Setup the headers to explicitly state JSON
     if not session: session = requests.Session()
     session.headers.update({
@@ -305,24 +354,34 @@ def api_request(
         response = apifunc(url, params=params, json=json)
         
         # Check for random internal server errors
-        if response.status_code == 500:
-            '''
-            API busy or temporarily unavailable.  Handle silently and try again
-            later until consecutive errors exceed the threshold.
-            '''
-            failure_count = history.add_failure()
-            print(f'{failure_count=}')  
-            log.info(f'FATAL API_REQUEST failed [500] - {url} [{failure_count}]')
-            if failure_count > FAILURES_BEFORE_ALERT:
-                send_failure_notification()
-            exit(1)
         response.raise_for_status()
 
-        # Flag if we're missing json response data
-        _ = response.json()
         return response
     except Exception as e:
-        die(f'API_REQUEST Failed - {e}', exit_code=99)
+        '''
+        API busy or temporarily unavailable.  Handle silently and try again
+        later until consecutive errors exceed the threshold.
+        '''
+        failure_count = history.add_failure()
+
+        # Identify if we need to send a cleanup method to die()
+        cleanup_method = None
+        if HEARTBEAT_REQUIRED:
+            log.debug(f'{HEARTBEAT_REQUIRED=}, Setting send_heartbeat for cleanup')
+            cleanup_method = send_heartbeat
+        if (
+            failure_count >= FAILURES_BEFORE_ALERT
+            and not history.get('failure_sent',0) 
+        ):
+            log.debug(f'{failure_count=}, {FAILURES_BEFORE_ALERT=}, Setting send_failure_notification for cleanup')
+            cleanup_method = send_failure_notification
+        
+        die(
+            f'API_REQUEST Failed [{failure_count}] {e}',
+            exit_code=99,
+            verbose=False,
+            cleanup=cleanup_method
+        )
 
 
 def get_external_ip() -> str:
@@ -334,7 +393,7 @@ def get_external_ip() -> str:
 def get_zone_id(session, zone_name):
     r = api_request(
         HttpMethod.GET,
-        "https://api.cloudflare.com/client/v4/zones",
+        "https://api.cloudflaxre.com/client/v4/zones",
         session=session,
         params={"name": zone_name},
     )
@@ -484,9 +543,24 @@ def send_update_notice(msg) -> None:
 
 ### Main Monitoring Pass Function
 def ddns_monitor() -> None:
+    '''
+    Primary Dyanmic DNS Monitor and Update method
+    '''
+    global HEARTBEAT_REQUIRED
+    if check_for_delay():
+        log.debug(
+            f'Exiting without running due to existing delay: '
+            f'nextrun="{get_datestr(history.get("delay_nextrun"))}"'
+        )
+        exit(0)
+    
     output_type = None
     output_msg = ''
-    if heartbeat(): output_type = 'heartbeat'
+
+    if heartbeat(): 
+        output_type = 'heartbeat'
+        HEARTBEAT_REQUIRED = True
+    
     ip = get_external_ip()
     
     session = requests.Session()
@@ -545,6 +619,7 @@ def ddns_monitor() -> None:
 log = LogClass()
 config = ConfigClass()
 history = HistoryClass()
+
 
 # Usage check section
 def usage() -> None:
