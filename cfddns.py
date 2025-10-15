@@ -70,7 +70,7 @@ def die(
     # Try to log but don't raise an exception if something is wrong
     # with the logger
     try: log.fatal(f'{msg}')
-    except: raise
+    except: pass
 
     if verbose: print(f'[FATAL] Exiting: {msg}')
     if callable(cleanup): cleanup()
