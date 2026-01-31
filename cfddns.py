@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 '''
-monitor_dyn_dns.py
+cfddns.py
 -
 Uses cloudflare API to perform 'dynamic DNS' operations to set and maintain
 dynamic A record for owned domains to use the current WAN IP address.
@@ -23,7 +23,7 @@ Configuration file is '.config' and uses JSON to define:
 See README.md for further details on configuration
 '''
 # Disabling warnings from urllib3 because I use a Mac and Apple mucks things up
-#  by building with LibreSSH instead of OpenSSH...
+#  by building with LibreSSL instead of OpenSSL...
 import warnings
 warnings.filterwarnings("ignore", module="urllib3")
 
@@ -34,10 +34,9 @@ import json
 import time
 import subprocess
 from datetime import datetime
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from enum import Enum, auto
+from enum import Enum
 
 HEARTBEAT_REQUIRED = False
 
@@ -68,20 +67,18 @@ def die(
     If cleanup is specified and callable, it will be called before exting.
     '''
     # Try to log but don't raise an exception if something is wrong
-    # with the logger
+    # with the logger - exit is already in flight
     try: log.fatal(f'{msg}')
-    except: pass
+    except Exception as e:
+        print(f'[die] Unable to write to log file: {e}', file=sys.stderr)
 
-    if verbose: print(f'[FATAL] Exiting: {msg}')
+    if verbose: print(f'[FATAL] Exiting: {msg}', file=sys.stderr)
     if callable(cleanup): cleanup()
 
     if not isinstance(exit_code,int) or exit_code == 0:
         exit(7)
     exit(exit_code)
 
-def dmesg(msg: str) -> None:
-    ''' Debugging only - calls to dmesg should be removed before push '''
-    print(f'D: {msg}')    
 
 def get_datestr(timestamp: float) -> str:
     ''' Return a nicely formatted datestring for a given timestamp '''
@@ -98,13 +95,15 @@ def sanitize_file_path(path_arg: Path, default_value: Path = None) -> Path:
     return Path(path_arg or default_value)
 
 def sanitize_record(record: str, domain: str) -> str:
-    ''' Sanitize DNS record name to ensure fully qualified '''
+    '''
+    Sanitize DNS record name to ensure fully qualified.
+    Rejects records containing '.' that don't end with the domain
+    to prevent typos from creating unintended DNS entries.
+    '''
     if '.' in record and not record.endswith(domain):
-        print(
-            f'Invalid record definition for RECORD item: {domain=}, {record=}',
-            file=sys.stderr
-            )
-    if not '.' in record: 
+        die(f'Invalid record definition: {domain=}, {record=}. '
+            f'Record must be a simple hostname or end with the domain.')
+    if not '.' in record:
         record = f'{record}.{domain}'
     return record
 
@@ -123,7 +122,7 @@ def check_for_delay() -> bool:
         return True
     elif delay_nextrun and delay_nextrun < time.time():
         # Delay is set and expired
-        log.debug(f'Delay timner for {get_datestr(delay_nextrun)} has expired.')
+        log.debug(f'Delay timer for {get_datestr(delay_nextrun)} has expired.')
         history.update('delay_nextrun',0)
     # No delay applicable
     return False
@@ -166,9 +165,10 @@ class ConfigClass:
                 f'\n--\n{e}'
             )          
     def __str__(self):
+        masked_token = self.CF_API_TOKEN[:10] + '.' * (len(self.CF_API_TOKEN) - 10)
         out = (
             f'Current Configuration Values:  \n'
-            f'   CF_API_TOKEN={self.CF_API_TOKEN}\n'
+            f'   CF_API_TOKEN={masked_token}\n'
             f'   RECORDS: \n'
         )
         for item in self.RECORDS:
@@ -214,7 +214,7 @@ class HistoryClass:
         # Setup the next-run delay threshold for an error
         delay = delay or DELAY_AFTER_ERROR
         delay_until = time.time() + delay
-        failures = self.data.get('failures',{})
+        failures = self.data.get('failures') or {}
         failures[self.run_id] = True
         self.update('failures',failures)
         self.update('delay_nextrun',delay_until)
@@ -245,7 +245,7 @@ class HistoryClass:
                 with open(self.history_file,'r') as f:
                     data = json.load(f)  
             except Exception as e:
-                print(f'Issue with history file, resetting...')
+                print(f'Issue with history file, resetting...', file=sys.stderr)
                 os.remove(self.history_file)
         return data
 
@@ -320,9 +320,9 @@ class LogClass:
 ##### API Endpoint Management
 
 class HttpMethod(Enum):
-    GET = auto()
-    POST = auto()
-    PUT = auto()
+    GET = 'get'
+    POST = 'post'
+    PUT = 'put'
 
 def api_request(
     method: HttpMethod,
@@ -343,9 +343,7 @@ def api_request(
         "Content-Type": "application/json",
         "Accept": "application/json"
     })
-    if method == HttpMethod.GET: apifunc = session.get
-    if method == HttpMethod.POST: apifunc = session.post
-    if method == HttpMethod.PUT: apifunc = session.put
+    apifunc = getattr(session, method.value)
 
     try:
         log.debug(
@@ -464,11 +462,11 @@ def send_email(send_from: str, send_to: str, notice: str, msg: str):
         proc.communicate(email_body)
         if proc.returncode != 0:
             raise RuntimeError(f"sendmail exited with {proc.returncode}")
+        # Update history to indicate the last time a message was sent
+        history.update('lastsent',time.time())
     except Exception as e:
         # Handle logging or fallback here
-        print(f"Failed to send notification: {e}")
-    # Update history to indicate the last time a message was sent
-    history.update('lastsent',time.time())
+        log.info(f"Failed to send notification: {e}")
 
 
 ### Heartbeat for Active Monitoring Confirmation
@@ -507,7 +505,8 @@ def send_heartbeat() -> None:
 def send_failure_notification() -> None:
     ''' Send notification of excessive API failures '''
     failure_sent = history.get('failure_sent',0)
-    failure_count = len(history.get('failures',[]))
+    failures = history.get('failures')
+    failure_count = len(failures) if failures else 0
     if failure_sent > 0: 
         # Failure has already been sent, exit
         exit(1)
@@ -576,12 +575,9 @@ def ddns_monitor() -> None:
 
         zone_id = get_zone_id(session, domain)
         record = get_record(session, zone_id, record_name)
-        try: 
-            record_ip = record['content']
-            record_id = record['id']
-        except: 
-            record_ip = None
-            record_id = None
+        record_ip = record['content'] if record else None
+        record_id = record['id'] if record else None
+        if not record:
             log.info(f'DNS entry missing for {domain=}, {record_name=}')
 
         if not record_ip == ip:
