@@ -142,10 +142,13 @@ class ConfigClass:
     
     config_file JSON Expected Values:
         CF_API_TOKEN: str - Cloudflare API Token with zone view-edit perms
-        RECORDS: list - dict objects {domain: zone, record_name: host}
+        RECORDS: list - dict objects {domain: zone, record_name: host,
+                         proxied (opt): bool}
         TIME_TO_NOTIFY: int - Seconds from lastsent timestamp for hb email
         SENDTO: str - Email address recipient for updates/heartbeat emails
         SENDFROM: str - Email address to use as originator for emails
+        PROXIED_BY_DEFAULT (opt): bool - Default proxied state for records
+                                         that do not specify their own value
     '''
     def __init__(self, config_file: Path = None):
         config_file = sanitize_file_path(config_file, DEFAULT_CONFIG_FILE)
@@ -159,21 +162,25 @@ class ConfigClass:
             self.TIME_TO_NOTIFY = conf_values['TIME_TO_NOTIFY']
             self.SENDTO = conf_values['SENDTO']
             self.SENDFROM = conf_values['SENDFROM']
+            self.PROXIED_BY_DEFAULT = conf_values.get('PROXIED_BY_DEFAULT', False)
         except Exception as e:
             die(
                 f'Error while reading/processing config file {str(config_file)}'
                 f'\n--\n{e}'
-            )          
+            )
     def __str__(self):
         masked_token = self.CF_API_TOKEN[:10] + '.' * (len(self.CF_API_TOKEN) - 10)
         out = (
             f'Current Configuration Values:  \n'
             f'   CF_API_TOKEN={masked_token}\n'
+            f'   PROXIED_BY_DEFAULT={self.PROXIED_BY_DEFAULT}\n'
             f'   RECORDS: \n'
         )
         for item in self.RECORDS:
+            proxied_val = item.get('proxied', self.PROXIED_BY_DEFAULT)
             out += (
-                f'        domain={item["domain"]} - record={item["record"]}\n'
+                f'        domain={item["domain"]} - record={item["record"]}'
+                f' - proxied={proxied_val}\n'
             )
         out += (
             f'    TIME_TO_NOTIFY={self.TIME_TO_NOTIFY}\n'
@@ -323,6 +330,7 @@ class HttpMethod(Enum):
     GET = 'get'
     POST = 'post'
     PUT = 'put'
+    PATCH = 'patch'
 
 def api_request(
     method: HttpMethod,
@@ -424,18 +432,24 @@ def get_record(session, zone_id, record_name):
         return None
     return records[0]
 
-def update_record(session, zone_id, record_id, record_name, ip):
+def update_record(
+    session, zone_id: str, record_id: str | None,
+    record_name: str, ip: str, proxied: bool
+) -> dict:
     url = f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records"
     if record_id:
         url = f"{url}/{record_id}"
-        method = HttpMethod.PUT
+        method = HttpMethod.PATCH
     else:
         method = HttpMethod.POST
     r = api_request(
         method,
         url,
         session=session,
-        json={"type": "A", "name": record_name, "content": ip, "ttl": 300},
+        json={
+            "type": "A", "name": record_name,
+            "content": ip, "ttl": 300, "proxied": proxied
+        },
     )
     return r.json()
 
@@ -568,31 +582,41 @@ def ddns_monitor() -> None:
         "Content-Type": "application/json"
     })
 
-    # Determine if any of the monitored domains need an IP update
+    # Determine if any of the monitored domains need an IP or proxy update
     for item in config.RECORDS:
         domain = item['domain']
-        record_name = sanitize_record(item['record'],domain)
+        record_name = sanitize_record(item['record'], domain)
+        proxied = item.get('proxied', config.PROXIED_BY_DEFAULT)
 
         zone_id = get_zone_id(session, domain)
         record = get_record(session, zone_id, record_name)
         record_ip = record['content'] if record else None
         record_id = record['id'] if record else None
+        record_proxied = record.get('proxied') if record else None
         if not record:
             log.info(f'DNS entry missing for {domain=}, {record_name=}')
 
-        if not record_ip == ip:
-            # Flag for update processing at the end
+        ip_changed = record_ip != ip
+        proxied_changed = record is not None and record_proxied != proxied
+        if ip_changed or proxied_changed:
             output_type = 'update'
-            action_type = "Updated" if record_ip else "New Record"
+            action_type = "New Record" if not record else "Updated"
+            changes = []
+            if ip_changed:
+                changes.append(f'IP: {record_ip} -> {ip}')
+            if proxied_changed:
+                changes.append(f'proxied: {record_proxied} -> {proxied}')
             output_msg += (
                 f'{action_type}: {record_name} (zone: {domain}) '
-                f'{record_ip} -> WAN_IP {ip}\n'
+                f'{", ".join(changes)}\n'
             )
-            result = update_record(session, zone_id, record_id, record_name, ip)
-            output_msg += (
-                f'Response Data:\n{json.dumps(result,indent=2)}\n\n'
+            result = update_record(
+                session, zone_id, record_id, record_name, ip, proxied
             )
-            log.info(f'Updated DNS entry "{record_name}" from {record_ip} -> {ip}')
+            output_msg += f'Response Data:\n{json.dumps(result,indent=2)}\n\n'
+            log.info(
+                f'Updated DNS entry "{record_name}": {", ".join(changes)}'
+            )
 
     # Handle output conditions on exit
     if output_type == 'heartbeat':

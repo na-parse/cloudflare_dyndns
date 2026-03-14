@@ -19,8 +19,10 @@ Configuration is defined in JSON format:
     "RECORDS": [
         {"domain": "example.net", "record": "vpn"},
         {"domain": "example.net", "record": "example.net"},
-        {"domain": "example.net", "record": "wanip.example.net"}
+        {"domain": "example.net", "record": "wanip.example.net"},
+        {"domain": "example.net", "record": "proxied-host", "proxied": true}
     ],
+    "PROXIED_BY_DEFAULT": false,
     "TIME_TO_NOTIFY": 604800,
     "SENDFROM": "dns-monitor@example.com",
     "SENDTO": "sysops@example.com"
@@ -36,7 +38,7 @@ at this time.
 ### RECORDS
 
 ```json
-{ "domain": "<domain>", "record": "<record>" }
+{ "domain": "<domain>", "record": "<record>", "proxied": false }
 ```
 
 - `domain`: The exact domain name as shown in your Cloudflare console.
@@ -44,6 +46,9 @@ at this time.
   - `hostname` — Hostname for the DNS A record to be updated
   - `example.com` — Specify the domain/zone name to set the root A record
   - `hostname.example.com` — Fully qualified hostname
+- `proxied` _(optional)_: Whether this record should be proxied through
+  Cloudflare. Overrides `PROXIED_BY_DEFAULT` for this record. See
+  [Cloudflare Proxy](#cloudflare-proxy) below.
 
 Embedded subdomains are **not supported**. For example:
 
@@ -52,6 +57,22 @@ Embedded subdomains are **not supported**. For example:
 ```
 
 is invalid.
+
+### Cloudflare Proxy
+
+Two settings control whether Cloudflare's proxy (orange cloud) is enabled for
+managed records:
+
+- `PROXIED_BY_DEFAULT` _(optional, default: `false`)_: Global default proxied
+  state applied to any record that does not specify its own `proxied` value.
+- `proxied` on a record entry _(optional)_: Per-record override of
+  `PROXIED_BY_DEFAULT`.
+
+When `cfddns` detects that a live record's proxied state differs from the
+configured value, it will push an update to correct it — even if the IP address
+has not changed. This means you can flip a record between proxied and
+unproxied by editing the config file alone, without touching the Cloudflare
+dashboard.
 
 ### Monitoring Values
 
@@ -78,9 +99,9 @@ entries. A 15-minute interval is generally sufficient:
 */15 * * * * /path/to/cloudflare_dyndns/cfddns.py
 ```
 
-Records are updated if the external IP address does not match, and they are
-created if they do not exist. No need to pre-create records in the Cloudflare
-dashboard.
+Records are updated if the external IP address does not match or if the live
+proxied state differs from the configured value. Records are created if they
+do not exist. No need to pre-create records in the Cloudflare dashboard.
 
 ### Email Notifications
 
