@@ -146,7 +146,10 @@ def check_wanip_refresh() -> None:
     if state != 'succeeded' or not failures or not history.get('delay_nextrun'):
         return
     try:
-        finished = datetime.fromisoformat(status['finished']).timestamp()
+        # Python < 3.11 fromisoformat() rejects a trailing 'Z' (UTC)
+        finished = datetime.fromisoformat(
+            status['finished'].replace('Z', '+00:00')
+        ).timestamp()
         last_failure = max(float(run_id) for run_id in failures)
     except Exception as e:
         log.debug(f'Unable to compare refresher/failure times: {e}')
