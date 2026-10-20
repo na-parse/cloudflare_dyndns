@@ -25,8 +25,7 @@ Configuration is defined in JSON format:
     "PROXIED_BY_DEFAULT": false,
     "TIME_TO_NOTIFY": 604800,
     "SENDFROM": "dns-monitor@example.com",
-    "SENDTO": "sysops@example.com",
-    "WANIP_REFRESH_STATUS_URL": "http://192.0.2.10:8780/status"
+    "SENDTO": "sysops@example.com"
 }
 ```
 
@@ -83,23 +82,6 @@ dashboard.
 - `SENDFROM`: Email address used in the `From:` field when sending emails.
 - `SENDTO`: Recipient email address for update and heartbeat notifications.
 
-### WAN IP Refresher _(optional)_
-
-- `WANIP_REFRESH_STATUS_URL`: Status endpoint of a WAN IP refresher service
-  (MAC clone + modem reboot). Before each run, `cfddns` queries this URL; if it
-  reports `"state": "running"`, the run is skipped with a clean exit and any
-  pending error delay is cleared. That way the expected outage doesn't trigger
-  the one-hour error delay, and the next scheduled run picks up the new IP
-  right away.
-
-  If a `cfddns` run is already in flight when a refresh starts, that run can
-  fail and set the error delay. When the refresher later reports
-  `"state": "succeeded"` with a `finished` time after the most recent failure,
-  the delay is cleared so the next run updates DNS immediately.
-
-  If the endpoint is unreachable or returns unexpected data, `cfddns` logs it
-  (verbose only) and proceeds normally. Omit the key to disable the check.
-
 ## Usage
 
 - `cfddns.py` — Perform Dynamic DNS monitoring and updates for configured
@@ -138,17 +120,33 @@ confirm the system is running normally.  Includes the most recent log messages.
 
 #### Errors
 
-Errors are treated as transient and result in a silent exit normally due to the
-unreliable nature of API end points (sporadic timeouts, 500/503 server issues)
-and will instead be tracked internally and logged.
+Failed API requests are logged and the run exits silently with a non-zero
+status. Every request has a 30-second timeout. Failures fall into three
+categories:
 
-After an error, `cfddns` sets a one-hour delay (TODO: add config element).
-Scheduled runs during that window exit without doing anything. The first run
-after the delay expires resumes normal operation.
+| Category | Trigger | Behavior | Exit |
+|---|---|---|---|
+| Endpoint API failure | 5xx, 429 (Cloudflare or ipify) | Error delay, alert on repeats | 99 |
+| Auth/route failure | Any other 4xx (401, 403, 404, ...) | Immediate alert email | 97 |
+| Connectivity failure | Refused, reset, DNS, timeout | Retry on next scheduled run | 98 |
 
-If three (TODO: add config element) consecutive runs result in errors, an alert
-email will be generated.  No further alert emails will be generated unless
-cfddns completes a normal run and resets the error counters.
+**Endpoint API failures** are usually transient (sporadic 500/503 server
+issues). After one, `cfddns` sets a one-hour delay (TODO: add config element).
+Scheduled runs during that window exit without doing anything. If three
+(TODO: add config element) consecutive runs fail, an alert email is sent.
+
+**Auth/route failures** usually mean the API token, permissions, or config
+need attention, so an alert email is sent right away. Runs continue on
+schedule (no delay) so a fix is picked up immediately.
+
+**Connectivity failures** (e.g. a WAN IP change in progress) set no delay and
+are not counted toward the alert threshold; the next scheduled run simply
+tries again.
+
+No repeat alerts are sent until `cfddns` completes a normal run and resets
+its error tracking. Heartbeats still go out on schedule during endpoint and
+connectivity failures. They are queued by the local MTA, so they are delivered
+once external routing recovers.
 
 ### Logging
 

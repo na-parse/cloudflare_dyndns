@@ -52,7 +52,7 @@ DEFAULT_LOG_FILE     = Path(__file__).parent / 'cfddns_activity.log'
 ### TODO: Config
 FAILURES_BEFORE_ALERT = 3
 DELAY_AFTER_ERROR = 60 * 60 # 1 Hour
-REFRESHER_TIMEOUT = 5 # Seconds to wait on WAN IP refresher status
+REQUEST_TIMEOUT = 30 # Seconds; requests has no default timeout
 
 
 ### Utility definitions
@@ -128,41 +128,6 @@ def check_for_delay() -> bool:
     # No delay applicable
     return False
 
-def check_wanip_refresh() -> None:
-    '''
-    Handles WAN IP refresher state ahead of the error delay check.
-    - "running": expected outage; clear any error delay and exit cleanly
-    - "succeeded": if the latest failure predates the refresh finishing, it
-      was likely a run disrupted by the refresh; clear the error delay
-    '''
-    status = get_wanip_refresh_status()
-    state = status.get('state')
-    if state == 'running':
-        log.info('WAN IP refresh in progress - skipping run')
-        history.update('delay_nextrun', 0)
-        exit(0)
-
-    failures = history.get('failures') or {}
-    if state != 'succeeded' or not failures or not history.get('delay_nextrun'):
-        return
-    try:
-        # Python < 3.11 fromisoformat() rejects a trailing 'Z' (UTC)
-        finished = datetime.fromisoformat(
-            status['finished'].replace('Z', '+00:00')
-        ).timestamp()
-        last_failure = max(float(run_id) for run_id in failures)
-    except Exception as e:
-        log.debug(f'Unable to compare refresher/failure times: {e}')
-        return
-    if last_failure < finished:
-        log.info(
-            f'Clearing error delay - failure at {get_datestr(last_failure)} '
-            f'overlapped WAN IP refresh finished {get_datestr(finished)}'
-        )
-        history.update('delay_nextrun', 0)
-
-
-
 
 ### cfddns Operational Objects
 class ConfigClass:
@@ -183,8 +148,6 @@ class ConfigClass:
         SENDFROM: str - Email address to use as originator for emails
         PROXIED_BY_DEFAULT (opt): bool - Default proxied state for records
                                          that do not specify their own value
-        WANIP_REFRESH_STATUS_URL (opt): str - WAN IP refresher status URL;
-                                         skip run while a reset is in progress
     '''
     def __init__(self, config_file: Path = None):
         config_file = sanitize_file_path(config_file, DEFAULT_CONFIG_FILE)
@@ -199,9 +162,6 @@ class ConfigClass:
             self.SENDTO = conf_values['SENDTO']
             self.SENDFROM = conf_values['SENDFROM']
             self.PROXIED_BY_DEFAULT = conf_values.get('PROXIED_BY_DEFAULT', False)
-            self.WANIP_REFRESH_STATUS_URL = conf_values.get(
-                'WANIP_REFRESH_STATUS_URL', None
-            )
         except Exception as e:
             die(
                 f'Error while reading/processing config file {str(config_file)}'
@@ -224,8 +184,7 @@ class ConfigClass:
         out += (
             f'    TIME_TO_NOTIFY={self.TIME_TO_NOTIFY}\n'
             f'    SENDTO={self.SENDTO}\n'
-            f'    SENDFROM={self.SENDFROM}\n'
-            f'    WANIP_REFRESH_STATUS_URL={self.WANIP_REFRESH_STATUS_URL}'
+            f'    SENDFROM={self.SENDFROM}'
         )
         return out
 
@@ -274,6 +233,7 @@ class HistoryClass:
         '''
         self.update('failures',{})
         self.update('failure_sent',0)
+        self.update('auth_failure_sent',0)
 
     def _flush_data(self) -> None:
         try:
@@ -383,8 +343,8 @@ def api_request(
     Wrapper for API calls to centralize exception and error handling.
     cfddns behavior is to log the error/issue in history log and
     exit in a non-zero status without any console output.
+    See api_failure() for failure classification.
     '''
-    global HEARTBEAT_REQUIRED
     # Setup the headers to explicitly state JSON
     if not session: session = requests.Session()
     session.headers.update({
@@ -397,62 +357,69 @@ def api_request(
         log.debug(
             f'Making API Request - {method.name} - {url} {params=} {json=}'
         )
-        response = apifunc(url, params=params, json=json)
-        
+        response = apifunc(
+            url, params=params, json=json, timeout=REQUEST_TIMEOUT
+        )
+
         # Check for random internal server errors
         response.raise_for_status()
 
         return response
     except Exception as e:
-        '''
-        API busy or temporarily unavailable.  Handle silently and try again
-        later until consecutive errors exceed the threshold.
-        '''
-        failure_count = history.add_failure()
+        api_failure(e)
 
-        # Identify if we need to send a cleanup method to die()
-        cleanup_method = None
-        if HEARTBEAT_REQUIRED:
-            log.debug(f'{HEARTBEAT_REQUIRED=}, Setting send_heartbeat for cleanup')
-            cleanup_method = send_heartbeat
-        if (
-            failure_count >= FAILURES_BEFORE_ALERT
-            and not history.get('failure_sent',0) 
-        ):
-            log.debug(f'{failure_count=}, {FAILURES_BEFORE_ALERT=}, Setting send_failure_notification for cleanup')
-            cleanup_method = send_failure_notification
-        
+def api_failure(e: Exception) -> None:
+    '''
+    Classifies a failed API request, logs it, and exits:
+    1 - Endpoint API failure (5xx, 429, other): count the failure, set the
+        error delay, and alert after FAILURES_BEFORE_ALERT consecutive failures
+    2 - Auth/route failure (remaining 4xx): alert immediately, once until the
+        next successful run.  Likely needs a config or code update.
+    3 - Connectivity failure (refused/reset/DNS/timeout): no delay or failure
+        count; the next scheduled run tries again
+    Cases 1 and 3 send a heartbeat if one is due.  Mail is queued by the local
+    MTA, so it goes out once external routing recovers.
+    '''
+    heartbeat_cleanup = send_heartbeat if HEARTBEAT_REQUIRED else None
+
+    # Case 3 - Connectivity (Timeout covers read timeouts)
+    if isinstance(e, (requests.ConnectionError, requests.Timeout)):
         die(
-            f'API_REQUEST Failed [{failure_count}] {e}',
-            exit_code=99,
+            f'API_REQUEST Connectivity Failure {e}',
+            exit_code=98,
+            verbose=False,
+            cleanup=heartbeat_cleanup
+        )
+
+    # Case 2 - Auth/Route: any 4xx except 429 (rate limited)
+    status = getattr(getattr(e, 'response', None), 'status_code', None)
+    if status and 400 <= status < 500 and status != 429:
+        cleanup_method = heartbeat_cleanup
+        if not history.get('auth_failure_sent', 0):
+            cleanup_method = send_auth_failure_notification
+        die(
+            f'API_REQUEST Auth/Route Failure {e}',
+            exit_code=97,
             verbose=False,
             cleanup=cleanup_method
         )
 
+    # Case 1 - Endpoint API failure: delay and alert on repeated failures
+    failure_count = history.add_failure()
+    cleanup_method = heartbeat_cleanup
+    if (
+        failure_count >= FAILURES_BEFORE_ALERT
+        and not history.get('failure_sent',0)
+    ):
+        log.debug(f'{failure_count=}, {FAILURES_BEFORE_ALERT=}, Setting send_failure_notification for cleanup')
+        cleanup_method = send_failure_notification
+    die(
+        f'API_REQUEST Failed [{failure_count}] {e}',
+        exit_code=99,
+        verbose=False,
+        cleanup=cleanup_method
+    )
 
-def get_wanip_refresh_status() -> dict:
-    '''
-    Fetches status from the optional WAN IP refresher service.
-    Bypasses api_request() so refresher issues never count as failures;
-    any error fails open (returns empty dict) and the run proceeds normally.
-
-    Returns:
-        dict - Refresher status, or {} if not configured or unavailable
-    '''
-    url = config.WANIP_REFRESH_STATUS_URL
-    if not url:
-        return {}
-    try:
-        r = requests.get(url, timeout=REFRESHER_TIMEOUT)
-        r.raise_for_status()
-        status = r.json()
-        if not isinstance(status, dict):
-            raise ValueError(f'unexpected status payload: {status!r}')
-    except Exception as e:
-        log.debug(f'WAN IP refresher status unavailable, continuing: {e}')
-        return {}
-    log.debug(f'WAN IP refresher state={status.get("state")!r}')
-    return status
 
 def get_external_ip() -> str:
     r = api_request(
@@ -602,6 +569,23 @@ def send_failure_notification() -> None:
     log.info(f'Sent excessive failures email to {config.SENDTO}')
     exit(1)
 
+def send_auth_failure_notification() -> None:
+    ''' Send immediate notification of an auth/route (4xx) API failure '''
+    send_email(
+        config.SENDFROM,
+        config.SENDTO,
+        notice='API Auth/Route Failure - Action Required',
+        msg=(
+            f"API request rejected (4xx) - check API token, permissions,\n"
+            f"and configured records.  No further alerts will be sent until\n"
+            f"a normal run completes.\n"
+            f"--\n{json.dumps(config.RECORDS,indent=2)}\n--\n"
+            f"Latest Logs:\n{log.show(reverse=True,limit=20)}"
+        )
+    )
+    history.update('auth_failure_sent',time.time())
+    log.info(f'Sent auth/route failure email to {config.SENDTO}')
+
 
 def send_update_notice(msg) -> None:
     ''' Send a notification of update email '''
@@ -624,7 +608,6 @@ def ddns_monitor() -> None:
     Primary Dyanmic DNS Monitor and Update method
     '''
     global HEARTBEAT_REQUIRED
-    check_wanip_refresh()
     if check_for_delay():
         log.debug(
             f'Exiting without running due to existing delay: '
