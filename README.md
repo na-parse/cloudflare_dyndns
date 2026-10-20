@@ -25,7 +25,8 @@ Configuration is defined in JSON format:
     "PROXIED_BY_DEFAULT": false,
     "TIME_TO_NOTIFY": 604800,
     "SENDFROM": "dns-monitor@example.com",
-    "SENDTO": "sysops@example.com"
+    "SENDTO": "sysops@example.com",
+    "WANIP_REFRESH_STATUS_URL": "http://192.0.2.10:8780/status"
 }
 ```
 
@@ -81,6 +82,23 @@ dashboard.
   scheduled. Example: `604800` seconds = 7 days.
 - `SENDFROM`: Email address used in the `From:` field when sending emails.
 - `SENDTO`: Recipient email address for update and heartbeat notifications.
+
+### WAN IP Refresher _(optional)_
+
+- `WANIP_REFRESH_STATUS_URL`: Status endpoint of a WAN IP refresher service
+  (MAC clone + modem reboot). Before each run, `cfddns` queries this URL; if it
+  reports `"state": "running"`, the run is skipped with a clean exit and any
+  pending error delay is cleared. That way the expected outage doesn't trigger
+  the one-hour error delay, and the next scheduled run picks up the new IP
+  right away.
+
+  If a `cfddns` run is already in flight when a refresh starts, that run can
+  fail and set the error delay. When the refresher later reports
+  `"state": "succeeded"` with a `finished` time after the most recent failure,
+  the delay is cleared so the next run updates DNS immediately.
+
+  If the endpoint is unreachable or returns unexpected data, `cfddns` logs it
+  (verbose only) and proceeds normally. Omit the key to disable the check.
 
 ## Usage
 
