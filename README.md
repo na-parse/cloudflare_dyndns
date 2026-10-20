@@ -145,8 +145,9 @@ tries again.
 
 No repeat alerts are sent until `cfddns` completes a normal run and resets
 its error tracking. Heartbeats still go out on schedule during endpoint and
-connectivity failures. They are queued by the local MTA, so they are delivered
-once external routing recovers.
+connectivity failures. An alert email takes the place of a due heartbeat.
+They are queued by the local MTA, so they are delivered once external
+routing recovers.
 
 ### Logging
 

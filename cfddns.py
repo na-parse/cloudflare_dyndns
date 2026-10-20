@@ -377,8 +377,9 @@ def api_failure(e: Exception) -> None:
         next successful run.  Likely needs a config or code update.
     3 - Connectivity failure (refused/reset/DNS/timeout): no delay or failure
         count; the next scheduled run tries again
-    Cases 1 and 3 send a heartbeat if one is due.  Mail is queued by the local
-    MTA, so it goes out once external routing recovers.
+    Cases 1 and 3 send a heartbeat if one is due, unless an alert email is
+    sent instead (it also resets the heartbeat timer).  Mail is queued by the
+    local MTA, so it goes out once external routing recovers.
     '''
     heartbeat_cleanup = send_heartbeat if HEARTBEAT_REQUIRED else None
 
