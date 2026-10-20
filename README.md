@@ -142,6 +142,10 @@ Errors are treated as transient and result in a silent exit normally due to the
 unreliable nature of API end points (sporadic timeouts, 500/503 server issues)
 and will instead be tracked internally and logged.
 
+After an error, `cfddns` sets a one-hour delay (TODO: add config element).
+Scheduled runs during that window exit without doing anything. The first run
+after the delay expires resumes normal operation.
+
 If three (TODO: add config element) consecutive runs result in errors, an alert
 email will be generated.  No further alert emails will be generated unless
 cfddns completes a normal run and resets the error counters.
