@@ -52,6 +52,7 @@ DEFAULT_LOG_FILE     = Path(__file__).parent / 'cfddns_activity.log'
 ### TODO: Config
 FAILURES_BEFORE_ALERT = 3
 DELAY_AFTER_ERROR = 60 * 60 # 1 Hour
+REFRESHER_TIMEOUT = 5 # Seconds to wait on WAN IP refresher status
 
 
 ### Utility definitions
@@ -127,6 +128,39 @@ def check_for_delay() -> bool:
     # No delay applicable
     return False
 
+def check_wanip_refresh() -> None:
+    '''
+    Handles WAN IP refresher state ahead of the error delay check.
+    - "running": expected outage; clear any error delay and exit cleanly
+    - "succeeded": if the latest failure predates the refresh finishing, it
+      was likely a run disrupted by the refresh; clear the error delay
+    '''
+    status = get_wanip_refresh_status()
+    state = status.get('state')
+    if state == 'running':
+        log.info('WAN IP refresh in progress - skipping run')
+        history.update('delay_nextrun', 0)
+        exit(0)
+
+    failures = history.get('failures') or {}
+    if state != 'succeeded' or not failures or not history.get('delay_nextrun'):
+        return
+    try:
+        # Python < 3.11 fromisoformat() rejects a trailing 'Z' (UTC)
+        finished = datetime.fromisoformat(
+            status['finished'].replace('Z', '+00:00')
+        ).timestamp()
+        last_failure = max(float(run_id) for run_id in failures)
+    except Exception as e:
+        log.debug(f'Unable to compare refresher/failure times: {e}')
+        return
+    if last_failure < finished:
+        log.info(
+            f'Clearing error delay - failure at {get_datestr(last_failure)} '
+            f'overlapped WAN IP refresh finished {get_datestr(finished)}'
+        )
+        history.update('delay_nextrun', 0)
+
 
 
 
@@ -149,6 +183,8 @@ class ConfigClass:
         SENDFROM: str - Email address to use as originator for emails
         PROXIED_BY_DEFAULT (opt): bool - Default proxied state for records
                                          that do not specify their own value
+        WANIP_REFRESH_STATUS_URL (opt): str - WAN IP refresher status URL;
+                                         skip run while a reset is in progress
     '''
     def __init__(self, config_file: Path = None):
         config_file = sanitize_file_path(config_file, DEFAULT_CONFIG_FILE)
@@ -163,6 +199,9 @@ class ConfigClass:
             self.SENDTO = conf_values['SENDTO']
             self.SENDFROM = conf_values['SENDFROM']
             self.PROXIED_BY_DEFAULT = conf_values.get('PROXIED_BY_DEFAULT', False)
+            self.WANIP_REFRESH_STATUS_URL = conf_values.get(
+                'WANIP_REFRESH_STATUS_URL', None
+            )
         except Exception as e:
             die(
                 f'Error while reading/processing config file {str(config_file)}'
@@ -185,7 +224,8 @@ class ConfigClass:
         out += (
             f'    TIME_TO_NOTIFY={self.TIME_TO_NOTIFY}\n'
             f'    SENDTO={self.SENDTO}\n'
-            f'    SENDFROM={self.SENDFROM}'
+            f'    SENDFROM={self.SENDFROM}\n'
+            f'    WANIP_REFRESH_STATUS_URL={self.WANIP_REFRESH_STATUS_URL}'
         )
         return out
 
@@ -390,6 +430,30 @@ def api_request(
         )
 
 
+def get_wanip_refresh_status() -> dict:
+    '''
+    Fetches status from the optional WAN IP refresher service.
+    Bypasses api_request() so refresher issues never count as failures;
+    any error fails open (returns empty dict) and the run proceeds normally.
+
+    Returns:
+        dict - Refresher status, or {} if not configured or unavailable
+    '''
+    url = config.WANIP_REFRESH_STATUS_URL
+    if not url:
+        return {}
+    try:
+        r = requests.get(url, timeout=REFRESHER_TIMEOUT)
+        r.raise_for_status()
+        status = r.json()
+        if not isinstance(status, dict):
+            raise ValueError(f'unexpected status payload: {status!r}')
+    except Exception as e:
+        log.debug(f'WAN IP refresher status unavailable, continuing: {e}')
+        return {}
+    log.debug(f'WAN IP refresher state={status.get("state")!r}')
+    return status
+
 def get_external_ip() -> str:
     r = api_request(
         HttpMethod.GET, "https://api.ipify.org", params={'format': 'json'}
@@ -560,6 +624,7 @@ def ddns_monitor() -> None:
     Primary Dyanmic DNS Monitor and Update method
     '''
     global HEARTBEAT_REQUIRED
+    check_wanip_refresh()
     if check_for_delay():
         log.debug(
             f'Exiting without running due to existing delay: '
